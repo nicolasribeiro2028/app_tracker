@@ -177,10 +177,16 @@ def contact_out(c: models.Contact) -> schemas.Contact:
     if c.company:
         company_name = c.company.name
         logo = c.company.logo_url or clearbit_logo(resolve_domain(c.company.domain, c.company.website))
+    last_chat = None
+    if c.sessions:
+        dates = [s.date for s in c.sessions if s.date]
+        last_chat = max(dates) if dates else None
     return schemas.Contact(
-        **{col: getattr(c, col) for col in ["id", "company_id", "name", "role", "email", "linkedin_url", "reached_out_on", "follow_up_date", "notes"]},
+        **{col: getattr(c, col) for col in ["id", "company_id", "name", "role", "email", "linkedin_url", "reached_out_on", "follow_up_date", "notes", "star_rating"]},
         company_name=company_name,
         company_logo_url=logo,
+        session_count=len(c.sessions),
+        last_chat=last_chat,
     )
 
 
@@ -387,3 +393,127 @@ def dashboard(db: Session = Depends(get_db)):
         questions=questions_count,
         upcoming_deadlines=deadlines,
     )
+
+
+# ── Chat Sessions ─────────────────────────────────────────────────────────────
+
+def session_out(s: models.ChatSession) -> schemas.ChatSession:
+    contact = s.contact
+    logo = None
+    company_name = None
+    if contact and contact.company:
+        company_name = contact.company.name
+        logo = contact.company.logo_url or clearbit_logo(resolve_domain(contact.company.domain, contact.company.website))
+    return schemas.ChatSession(
+        id=s.id,
+        contact_id=s.contact_id,
+        date=s.date,
+        summary=s.summary,
+        raw_notes=s.raw_notes,
+        created_at=s.created_at,
+        learnings=[schemas.Learning(
+            id=l.id, session_id=l.session_id, contact_id=l.contact_id,
+            bullet=l.bullet, created_at=l.created_at,
+        ) for l in s.learnings],
+        contact_name=contact.name if contact else None,
+        contact_company=company_name,
+        contact_logo_url=logo,
+    )
+
+
+@app.get("/sessions", response_model=list[schemas.ChatSession])
+def list_sessions(contact_id: Optional[int] = None, db: Session = Depends(get_db)):
+    q = db.query(models.ChatSession)
+    if contact_id:
+        q = q.filter(models.ChatSession.contact_id == contact_id)
+    return [session_out(s) for s in q.order_by(models.ChatSession.date.desc()).all()]
+
+
+@app.post("/sessions", response_model=schemas.ChatSession, status_code=201)
+def create_session(payload: schemas.ChatSessionCreate, db: Session = Depends(get_db)):
+    data = payload.model_dump()
+    bullet_texts = data.pop("learnings", [])
+    session = models.ChatSession(**data)
+    db.add(session)
+    db.flush()
+    for b in bullet_texts:
+        if b.strip():
+            db.add(models.Learning(session_id=session.id, contact_id=session.contact_id, bullet=b.strip()))
+    db.commit()
+    db.refresh(session)
+    return session_out(session)
+
+
+@app.get("/sessions/{session_id}", response_model=schemas.ChatSession)
+def get_session(session_id: int, db: Session = Depends(get_db)):
+    s = db.query(models.ChatSession).filter(models.ChatSession.id == session_id).first()
+    if not s:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session_out(s)
+
+
+@app.put("/sessions/{session_id}", response_model=schemas.ChatSession)
+def update_session(session_id: int, payload: schemas.ChatSessionUpdate, db: Session = Depends(get_db)):
+    s = db.query(models.ChatSession).filter(models.ChatSession.id == session_id).first()
+    if not s:
+        raise HTTPException(status_code=404, detail="Session not found")
+    data = payload.model_dump(exclude_unset=True)
+    bullet_texts = data.pop("learnings", None)
+    for k, v in data.items():
+        setattr(s, k, v)
+    if bullet_texts is not None:
+        for l in s.learnings:
+            db.delete(l)
+        db.flush()
+        for b in bullet_texts:
+            if b.strip():
+                db.add(models.Learning(session_id=s.id, contact_id=s.contact_id, bullet=b.strip()))
+    db.commit()
+    db.refresh(s)
+    return session_out(s)
+
+
+@app.delete("/sessions/{session_id}", status_code=204)
+def delete_session(session_id: int, db: Session = Depends(get_db)):
+    s = db.query(models.ChatSession).filter(models.ChatSession.id == session_id).first()
+    if not s:
+        raise HTTPException(status_code=404, detail="Session not found")
+    db.delete(s)
+    db.commit()
+
+
+# ── AI: Extract Learnings ─────────────────────────────────────────────────────
+
+@app.post("/ai/extract-learnings", response_model=schemas.ExtractResponse)
+def extract_learnings(payload: schemas.ExtractRequest):
+    import os
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not set")
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": f"""You are helping a college student extract key learnings from their coffee chat notes.
+
+Read the raw notes below and extract 3-7 concise, insightful bullet points that capture the most valuable things learned.
+Focus on: career insights, company culture, industry knowledge, advice given, and anything actionable.
+Each bullet should be 1-2 sentences max. Return ONLY the bullet points, one per line, starting with "- ".
+
+Raw notes:
+{payload.raw_notes}"""
+            }]
+        )
+        text = message.content[0].text
+        bullets = [
+            line.lstrip("- •*").strip()
+            for line in text.strip().split("\n")
+            if line.strip() and line.strip() not in ("", "\n")
+        ]
+        return schemas.ExtractResponse(learnings=[b for b in bullets if b])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

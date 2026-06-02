@@ -43,8 +43,32 @@ export interface Contact {
   reached_out_on?: string;
   follow_up_date?: string;
   notes?: string;
+  star_rating?: number;
   company_name?: string;
   company_logo_url?: string;
+  session_count: number;
+  last_chat?: string;
+}
+
+export interface Learning {
+  id: number;
+  session_id: number;
+  contact_id: number;
+  bullet: string;
+  created_at?: string;
+}
+
+export interface ChatSession {
+  id: number;
+  contact_id: number;
+  date: string;
+  summary?: string;
+  raw_notes?: string;
+  created_at?: string;
+  learnings: Learning[];
+  contact_name?: string;
+  contact_company?: string;
+  contact_logo_url?: string;
 }
 
 export interface Question {

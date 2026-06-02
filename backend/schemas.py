@@ -69,6 +69,7 @@ class ContactBase(BaseModel):
     reached_out_on: Optional[date] = None
     follow_up_date: Optional[date] = None
     notes: Optional[str] = None
+    star_rating: Optional[int] = None
 
 class ContactCreate(ContactBase):
     pass
@@ -80,9 +81,65 @@ class Contact(ContactBase):
     id: int
     company_name: Optional[str] = None
     company_logo_url: Optional[str] = None
+    session_count: int = 0
+    last_chat: Optional[date] = None
 
     class Config:
         from_attributes = True
+
+
+# --- Chat Session ---
+
+class LearningBase(BaseModel):
+    bullet: str
+
+class LearningCreate(LearningBase):
+    pass
+
+class Learning(LearningBase):
+    id: int
+    session_id: int
+    contact_id: int
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ChatSessionBase(BaseModel):
+    contact_id: int
+    date: date
+    summary: Optional[str] = None
+    raw_notes: Optional[str] = None
+
+class ChatSessionCreate(ChatSessionBase):
+    learnings: list[str] = []
+
+class ChatSessionUpdate(BaseModel):
+    date: Optional[date] = None
+    summary: Optional[str] = None
+    raw_notes: Optional[str] = None
+    learnings: Optional[list[str]] = None
+
+class ChatSession(ChatSessionBase):
+    id: int
+    created_at: Optional[datetime] = None
+    learnings: list[Learning] = []
+    contact_name: Optional[str] = None
+    contact_company: Optional[str] = None
+    contact_logo_url: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+# --- AI Extract ---
+
+class ExtractRequest(BaseModel):
+    raw_notes: str
+
+class ExtractResponse(BaseModel):
+    learnings: list[str]
 
 
 # --- Question ---
